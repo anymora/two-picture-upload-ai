@@ -412,13 +412,7 @@ app.post(
         mockupFilename,
         "image/png"
       );
-
-      // 5) Optional: Mockup als Produktbild anhängen
-      try {
-        await attachMockupToShopifyProduct({ productId, mockupUrl });
-      } catch (shopifyErr) {
-        console.error("Fehler bei attachMockupToShopifyProduct:", shopifyErr);
-      }
+      
 
       console.log("Erfolgreich generiert:", { designUrl, mockupUrl });
 
