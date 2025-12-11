@@ -9,7 +9,6 @@ dotenv.config();
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "DEIN_OPENAI_API_KEY_HIER";
 
 // Referenzbild & Mockup-Vorlage (LOKALE DATEIPFADE im Container)
-// Wenn ENV fehlt, werden ./assets/reference.png & ./assets/mockup-template.png benutzt.
 const REFERENCE_IMAGE_PATH =
   process.env.REFERENCE_IMAGE_PATH || "./assets/reference.png";
 const MOCKUP_TEMPLATE_PATH =
@@ -18,8 +17,14 @@ const MOCKUP_TEMPLATE_PATH =
 // Prompt / Beschreibung für die KI
 const BASE_PROMPT =
   process.env.BASE_PROMPT ||
-  "Erstelle ein professionelles Fußballtrikot-Design mit dem Hundemotiv. " +
-    "Das Design soll druckfertig sein, ohne Hintergrund, nur das flache Trikot-Design.";
+  "Nutze die BILDER WIE FOLGT: Bild 1 = Referenzbild des fertigen Trikot-Designs. " +
+    "Bild 2 = Foto des Hundes des Kunden (nur dieses Gesicht verwenden). " +
+    "Bild 3 = Foto des leeren Trikots des Kunden. Aufgabe: Erstelle ein neues, " +
+    "druckfertiges Fußballtrikot-Design im Stil von Bild 1. Ersetze den Hund aus Bild 1 " +
+    "durch den Hund aus Bild 2, mit möglichst ähnlichem Bildausschnitt, Blickrichtung " +
+    "und Stil. Übernimm Farben, Streifen, Logos und Layout so genau wie möglich aus Bild 1. " +
+    "Ignoriere die Hintergründe aller Bilder. Liefere ein vollflächiges Trikot-Design mit " +
+    "deckendem Hintergrund (kein Transparent), geeignet für Druck und Mockups.";
 
 // ---- Mockup / Overlay ----
 const USE_MOCKUP_TEMPLATE =
@@ -28,6 +33,16 @@ const USE_MOCKUP_TEMPLATE =
 const DESIGN_SCALE = parseFloat(process.env.DESIGN_SCALE || "0.6");
 const DESIGN_POSITION_X = parseFloat(process.env.DESIGN_POSITION_X || "0.0");
 const DESIGN_POSITION_Y = parseFloat(process.env.DESIGN_POSITION_Y || "-0.1");
+
+// Zielauflösung für das Design-Bild (z.B. Druckdatei)
+const DESIGN_OUTPUT_WIDTH = parseInt(
+  process.env.DESIGN_OUTPUT_WIDTH || "3425",
+  10
+);
+const DESIGN_OUTPUT_HEIGHT = parseInt(
+  process.env.DESIGN_OUTPUT_HEIGHT || "2953",
+  10
+);
 
 // ---- Shopify ----
 const SHOPIFY_STORE_DOMAIN =
@@ -108,7 +123,7 @@ async function uploadBufferAndGetUrl(buffer, filename, mimeType = "image/png") {
 }
 
 // =========================================================
-// OpenAI: Hund + Trikot + Referenz-Bild → Design (LOKALE Dateien)
+// OpenAI: Referenz + Hund + Trikot → Design
 
 async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
   if (!OPENAI_API_KEY || OPENAI_API_KEY === "DEIN_OPENAI_API_KEY_HIER") {
@@ -127,6 +142,13 @@ async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
   formData.append("model", "gpt-image-1");
   formData.append("prompt", BASE_PROMPT);
 
+  // WICHTIG: mehrere Bilder => image[]
+  // Reihenfolge wie im Prompt beschrieben:
+  // Bild 1 = Referenz, Bild 2 = Hund, Bild 3 = Trikot
+  formData.append("image[]", referenceBuffer, {
+    filename: "reference.png",
+    contentType: "image/png"
+  });
   formData.append("image[]", dogBuffer, {
     filename: "dog.png",
     contentType: "image/png"
@@ -135,12 +157,15 @@ async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
     filename: "jersey.png",
     contentType: "image/png"
   });
-  formData.append("image[]", referenceBuffer, {
-    filename: "reference.png",
-    contentType: "image/png"
-  });
 
+  // hohe Treue, hohe Qualität, deckender Hintergrund
+  formData.append("input_fidelity", "high");
+  formData.append("quality", "high");
+  formData.append("background", "opaque");
+
+  // unterstützte Größe der API – später skalieren wir auf 3425x2953
   formData.append("size", "1024x1024");
+
   formData.append("output_format", "png");
   formData.append("n", "1");
 
@@ -295,11 +320,17 @@ async function attachMockupToShopifyProduct({ productId, mockupUrl }) {
 
   const json = await resp.json();
   if (json.errors) {
-    console.error("[Shopify] GraphQL errors:", JSON.stringify(json.errors, null, 2));
+    console.error(
+      "[Shopify] GraphQL errors:",
+      JSON.stringify(json.errors, null, 2)
+    );
   }
   const mediaErrors = json.data?.productCreateMedia?.mediaUserErrors || [];
   if (mediaErrors.length > 0) {
-    console.error("[Shopify] mediaUserErrors:", JSON.stringify(mediaErrors, null, 2));
+    console.error(
+      "[Shopify] mediaUserErrors:",
+      JSON.stringify(mediaErrors, null, 2)
+    );
   }
 }
 
@@ -345,22 +376,33 @@ app.post(
         });
       }
 
+      // 1) KI-Design erzeugen
       const designBuffer = await generateDesignWithOpenAI({
         dogBuffer: dogFile.buffer,
         jerseyBuffer: jerseyFile.buffer
       });
 
+      // 2) Design auf Zielauflösung skalieren (für Download / Druck)
+      const designOutputBuffer = await sharp(designBuffer)
+        .resize(DESIGN_OUTPUT_WIDTH, DESIGN_OUTPUT_HEIGHT, {
+          fit: "cover" // füllt komplett, schneidet ggf. leicht an den Rändern
+        })
+        .png()
+        .toBuffer();
+
+      // 3) Mockup erzeugen (nutzt das Original-Design)
       const mockupBuffer = await createMockup({
         jerseyBuffer: jerseyFile.buffer,
         designBuffer
       });
 
+      // 4) Beides in R2 hochladen
       const timestamp = Date.now();
       const designFilename = `design-${productId || "no-product"}-${timestamp}.png`;
       const mockupFilename = `mockup-${productId || "no-product"}-${timestamp}.png`;
 
       const designUrl = await uploadBufferAndGetUrl(
-        designBuffer,
+        designOutputBuffer,
         designFilename,
         "image/png"
       );
@@ -370,6 +412,7 @@ app.post(
         "image/png"
       );
 
+      // 5) Optional: Mockup als Produktbild anhängen
       try {
         await attachMockupToShopifyProduct({ productId, mockupUrl });
       } catch (shopifyErr) {
