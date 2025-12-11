@@ -2,137 +2,194 @@
 
 // ================== KONFIGURATION (OBEN) ==================
 
-import dotenv from 'dotenv';
+import dotenv from "dotenv";
 dotenv.config();
 
 // ---- OpenAI / KI ----
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'DEIN_OPENAI_API_KEY_HIER';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "DEIN_OPENAI_API_KEY_HIER";
 
 // Referenzbild (Dateipfad im Container, z.B. ./assets/reference.png)
 const REFERENCE_IMAGE_PATH =
-  process.env.REFERENCE_IMAGE_PATH || './assets/reference.png';
+  process.env.REFERENCE_IMAGE_PATH || "./assets/reference.png";
 
 // Prompt / Beschreibung für die KI
 const BASE_PROMPT =
   process.env.BASE_PROMPT ||
-  'Erstelle ein professionelles Fußballtrikot-Design mit dem Hundemotiv. ' +
-    'Das Design soll druckfertig sein, ohne Hintergrund, nur das flache Trikot-Design.';
+  "Erstelle ein professionelles Fußballtrikot-Design mit dem Hundemotiv. " +
+    "Das Design soll druckfertig sein, ohne Hintergrund, nur das flache Trikot-Design.";
 
 // ---- Mockup / Overlay ----
 const MOCKUP_TEMPLATE_PATH =
-  process.env.MOCKUP_TEMPLATE_PATH || './assets/mockup-template.png';
+  process.env.MOCKUP_TEMPLATE_PATH || "./assets/mockup-template.png";
 
 // Wenn true: als Basis fürs Mockup wird die MOCKUP_TEMPLATE_PATH-Datei verwendet.
 // Wenn false: als Basis wird das hochgeladene Trikotbild des Kunden verwendet.
 const USE_MOCKUP_TEMPLATE =
-  process.env.USE_MOCKUP_TEMPLATE === 'false' ? false : true;
+  process.env.USE_MOCKUP_TEMPLATE === "false" ? false : true;
 
 // Skalierung des Designs relativ zur Breite des Mockups (0.0 - 1.0)
-const DESIGN_SCALE = parseFloat(process.env.DESIGN_SCALE || '0.6');
+const DESIGN_SCALE = parseFloat(process.env.DESIGN_SCALE || "0.6");
 
 // Position des Designs relativ zur Bildmitte:
 // X: -1 = ganz links, 0 = mittig, 1 = ganz rechts
 // Y: -1 = ganz oben, 0 = mittig, 1 = ganz unten
-const DESIGN_POSITION_X = parseFloat(process.env.DESIGN_POSITION_X || '0.0');
-const DESIGN_POSITION_Y = parseFloat(process.env.DESIGN_POSITION_Y || '-0.1');
+const DESIGN_POSITION_X = parseFloat(process.env.DESIGN_POSITION_X || "0.0");
+const DESIGN_POSITION_Y = parseFloat(process.env.DESIGN_POSITION_Y || "-0.1");
 
 // ---- Shopify ----
 const SHOPIFY_STORE_DOMAIN =
-  process.env.SHOPIFY_STORE_DOMAIN || 'dein-shop.myshopify.com';
+  process.env.SHOPIFY_STORE_DOMAIN || "dein-shop.myshopify.com";
 
 // Admin Access Token aus der Custom App
 const SHOPIFY_ADMIN_ACCESS_TOKEN =
-  process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || 'shpat_XXX';
+  process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || "shpat_XXX";
 
 // Ob das Mockup-Bild automatisch als Produktbild an Shopify gehängt werden soll
 const ENABLE_SHOPIFY_PRODUCT_IMAGE_UPDATE =
-  process.env.ENABLE_SHOPIFY_PRODUCT_IMAGE_UPDATE === 'true';
+  process.env.ENABLE_SHOPIFY_PRODUCT_IMAGE_UPDATE === "true";
+
+// ---- Cloudflare R2 ----
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET_NAME =
+  process.env.R2_BUCKET_NAME || "two-picture-upload-ai";
+const R2_PUBLIC_BASE_URL = process.env.R2_PUBLIC_BASE_URL; // öffentlich erreichbare Basis-URL
 
 // ---- Generelles ----
 const PORT = process.env.PORT || 3000;
 
 // =========================================================
 
-import express from 'express';
-import multer from 'multer';
-import sharp from 'sharp';
-import fs from 'fs/promises';
-import fetch from 'node-fetch';
-import FormData from 'form-data';
+import express from "express";
+import multer from "multer";
+import sharp from "sharp";
+import fs from "fs/promises";
+import fetch from "node-fetch";
+import FormData from "form-data";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
 // Multer: Dateien im RAM
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
 });
 
-// TODO: Hier musst du deinen Storage anbinden (S3, R2, eigenes CDN, …)
-async function uploadBufferAndGetUrl(buffer, filename, mimeType = 'image/png') {
-  // HIER DEINEN EIGENEN UPLOAD-CODE EINBAUEN!
-  // z.B. AWS S3 putObject, Cloudflare R2 etc.
-  // Am Ende MUSS eine öffentlich erreichbare HTTPS-URL zurückkommen.
-  // Solange das nicht implementiert ist, wird der Endpoint hier abbrechen.
-  throw new Error(
-    'uploadBufferAndGetUrl ist noch nicht implementiert. Bitte an deinen Storage anbinden.'
+// ============== Cloudflare R2 Client ======================
+
+if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
+  console.warn(
+    "[R2] Achtung: R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY nicht gesetzt. Uploads werden fehlschlagen."
   );
 }
 
-// OpenAI: aus Hund + Trikot + Referenz-Bild ein Design erzeugen (Dateipfade!)
-async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
-  if (!OPENAI_API_KEY || OPENAI_API_KEY === 'DEIN_OPENAI_API_KEY_HIER') {
-    throw new Error('OPENAI_API_KEY ist nicht gesetzt.');
+const r2Client = new S3Client({
+  region: "auto",
+  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: R2_ACCESS_KEY_ID || "",
+    secretAccessKey: R2_SECRET_ACCESS_KEY || "",
+  },
+});
+
+// Upload einer Datei nach R2 und Rückgabe einer öffentlichen URL
+async function uploadBufferAndGetUrl(
+  buffer,
+  filename,
+  mimeType = "image/png"
+) {
+  if (!R2_BUCKET_NAME) {
+    throw new Error("R2_BUCKET_NAME ist nicht gesetzt.");
+  }
+  if (!R2_PUBLIC_BASE_URL) {
+    throw new Error(
+      "R2_PUBLIC_BASE_URL ist nicht gesetzt. Bitte öffentliche Basis-URL deines Buckets angeben."
+    );
   }
 
-  const referenceBuffer = await fs.readFile(REFERENCE_IMAGE_PATH).catch((err) => {
-    console.error('Fehler beim Laden des Referenzbilds:', err);
-    throw new Error('REFERENZBILD konnte nicht geladen werden. Pfad prüfen.');
+  const key = filename; // wir verwenden den Dateinamen direkt als Key
+
+  const putCommand = new PutObjectCommand({
+    Bucket: R2_BUCKET_NAME,
+    Key: key,
+    Body: buffer,
+    ContentType: mimeType,
   });
+
+  await r2Client.send(putCommand);
+
+  // Öffentliche URL zusammensetzen, z.B. https://cdn.deinedomain.com/design-123.png
+  const base = R2_PUBLIC_BASE_URL.replace(/\/$/, "");
+  const publicUrl = `${base}/${encodeURIComponent(key)}`;
+
+  return publicUrl;
+}
+
+// =========================================================
+
+// OpenAI: aus Hund + Trikot + Referenz-Bild ein Design erzeugen (Dateipfade!)
+async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
+  if (!OPENAI_API_KEY || OPENAI_API_KEY === "DEIN_OPENAI_API_KEY_HIER") {
+    throw new Error("OPENAI_API_KEY ist nicht gesetzt.");
+  }
+
+  const referenceBuffer = await fs.readFile(REFERENCE_IMAGE_PATH).catch(
+    (err) => {
+      console.error("Fehler beim Laden des Referenzbilds:", err);
+      throw new Error(
+        "REFERENZBILD konnte nicht geladen werden. Pfad prüfen."
+      );
+    }
+  );
 
   const formData = new FormData();
-  formData.append('model', 'gpt-image-1');
-  formData.append('prompt', BASE_PROMPT);
+  formData.append("model", "gpt-image-1");
+  formData.append("prompt", BASE_PROMPT);
 
   // Mehrere input images: Hund, Trikot, Referenz
-  formData.append('image[]', dogBuffer, {
-    filename: 'dog.png',
-    contentType: 'image/png'
+  formData.append("image[]", dogBuffer, {
+    filename: "dog.png",
+    contentType: "image/png",
   });
-  formData.append('image[]', jerseyBuffer, {
-    filename: 'jersey.png',
-    contentType: 'image/png'
+  formData.append("image[]", jerseyBuffer, {
+    filename: "jersey.png",
+    contentType: "image/png",
   });
-  formData.append('image[]', referenceBuffer, {
-    filename: 'reference.png',
-    contentType: 'image/png'
+  formData.append("image[]", referenceBuffer, {
+    filename: "reference.png",
+    contentType: "image/png",
   });
 
-  formData.append('size', '1024x1024');
-  formData.append('output_format', 'png');
-  formData.append('n', '1');
+  formData.append("size", "1024x1024");
+  formData.append("output_format", "png");
+  formData.append("n", "1");
 
-  const response = await fetch('https://api.openai.com/v1/images/edits', {
-    method: 'POST',
+  const response = await fetch("https://api.openai.com/v1/images/edits", {
+    method: "POST",
     headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
     },
-    body: formData
+    body: formData,
   });
 
   if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    console.error('OpenAI-Fehler:', response.status, text);
-    throw new Error('OpenAI API Request fehlgeschlagen.');
+    const text = await response.text().catch(() => "");
+    console.error("OpenAI-Fehler:", response.status, text);
+    throw new Error("OpenAI API Request fehlgeschlagen.");
   }
 
   const json = await response.json();
 
   const b64 = json?.data?.[0]?.b64_json;
   if (!b64) {
-    console.error('OpenAI Antwort ohne b64_json:', JSON.stringify(json, null, 2));
-    throw new Error('OpenAI hat kein Bild zurückgegeben.');
+    console.error(
+      "OpenAI Antwort ohne b64_json:",
+      JSON.stringify(json, null, 2)
+    );
+    throw new Error("OpenAI hat kein Bild zurückgegeben.");
   }
 
-  const designBuffer = Buffer.from(b64, 'base64');
+  const designBuffer = Buffer.from(b64, "base64");
   return designBuffer;
 }
 
@@ -142,10 +199,15 @@ async function createMockup({ jerseyBuffer, designBuffer }) {
   let baseBuffer;
 
   if (USE_MOCKUP_TEMPLATE) {
-    baseBuffer = await fs.readFile(MOCKUP_TEMPLATE_PATH).catch((err) => {
-      console.error('Fehler beim Laden der Mockup-Vorlage, fallback auf Kunden-Trikot:', err);
-      return jerseyBuffer;
-    });
+    baseBuffer = await fs
+      .readFile(MOCKUP_TEMPLATE_PATH)
+      .catch((err) => {
+        console.error(
+          "Fehler beim Laden der Mockup-Vorlage, fallback auf Kunden-Trikot:",
+          err
+        );
+        return jerseyBuffer;
+      });
   } else {
     baseBuffer = jerseyBuffer;
   }
@@ -179,8 +241,8 @@ async function createMockup({ jerseyBuffer, designBuffer }) {
         input: designResizedBuffer,
         left,
         top,
-        blend: 'over'
-      }
+        blend: "over",
+      },
     ])
     .png()
     .toBuffer();
@@ -193,12 +255,12 @@ async function attachMockupToShopifyProduct({ productId, mockupUrl }) {
   if (!ENABLE_SHOPIFY_PRODUCT_IMAGE_UPDATE) return;
   if (!SHOPIFY_ADMIN_ACCESS_TOKEN || !SHOPIFY_STORE_DOMAIN) {
     console.warn(
-      '[Shopify] Admin-Access-Token oder Store Domain nicht gesetzt. Produktbild wird nicht aktualisiert.'
+      "[Shopify] Admin-Access-Token oder Store Domain nicht gesetzt. Produktbild wird nicht aktualisiert."
     );
     return;
   }
   if (!productId || !mockupUrl) {
-    console.warn('[Shopify] Kein productId oder mockupUrl übergeben.');
+    console.warn("[Shopify] Kein productId oder mockupUrl übergeben.");
     return;
   }
 
@@ -232,29 +294,29 @@ async function attachMockupToShopifyProduct({ productId, mockupUrl }) {
       media: [
         {
           originalSource: mockupUrl,
-          mediaContentType: 'IMAGE',
-          alt: 'AI-generiertes Mockup'
-        }
-      ]
-    }
+          mediaContentType: "IMAGE",
+          alt: "AI-generiertes Mockup",
+        },
+      ],
+    },
   });
 
   const resp = await fetch(endpoint, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'X-Shopify-Access-Token': SHOPIFY_ADMIN_ACCESS_TOKEN,
-      'Content-Type': 'application/json'
+      "X-Shopify-Access-Token": SHOPIFY_ADMIN_ACCESS_TOKEN,
+      "Content-Type": "application/json",
     },
-    body
+    body,
   });
 
   const json = await resp.json();
   if (json.errors) {
-    console.error('[Shopify] GraphQL errors:', JSON.stringify(json.errors, null, 2));
+    console.error("[Shopify] GraphQL errors:", JSON.stringify(json.errors, null, 2));
   }
   const mediaErrors = json.data?.productCreateMedia?.mediaUserErrors || [];
   if (mediaErrors.length > 0) {
-    console.error('[Shopify] mediaUserErrors:', JSON.stringify(mediaErrors, null, 2));
+    console.error("[Shopify] mediaUserErrors:", JSON.stringify(mediaErrors, null, 2));
   }
 }
 
@@ -262,7 +324,7 @@ async function attachMockupToShopifyProduct({ productId, mockupUrl }) {
 const app = express();
 
 // Healthcheck
-app.get('/health', (req, res) => {
+app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
@@ -275,10 +337,10 @@ app.get('/health', (req, res) => {
  * - variantId (optional, falls du sie später brauchst)
  */
 app.post(
-  '/api/tib/generate-simple',
+  "/api/tib/generate-simple",
   upload.fields([
-    { name: 'dogImage', maxCount: 1 },
-    { name: 'jerseyImage', maxCount: 1 }
+    { name: "dogImage", maxCount: 1 },
+    { name: "jerseyImage", maxCount: 1 },
   ]),
   async (req, res) => {
     try {
@@ -289,43 +351,43 @@ app.post(
 
       if (!dogFile || !jerseyFile) {
         return res.status(400).json({
-          error: 'dogImage und jerseyImage sind Pflicht.'
+          error: "dogImage und jerseyImage sind Pflicht.",
         });
       }
 
       // 1) Design erzeugen
       const designBuffer = await generateDesignWithOpenAI({
         dogBuffer: dogFile.buffer,
-        jerseyBuffer: jerseyFile.buffer
+        jerseyBuffer: jerseyFile.buffer,
       });
 
       // 2) Mockup erzeugen
       const mockupBuffer = await createMockup({
         jerseyBuffer: jerseyFile.buffer,
-        designBuffer
+        designBuffer,
       });
 
-      // 3) Beides hochladen (DEINE Implementierung in uploadBufferAndGetUrl)
+      // 3) Beides in R2 hochladen
       const timestamp = Date.now();
-      const designFilename = `design-${productId || 'no-product'}-${timestamp}.png`;
-      const mockupFilename = `mockup-${productId || 'no-product'}-${timestamp}.png`;
+      const designFilename = `design-${productId || "no-product"}-${timestamp}.png`;
+      const mockupFilename = `mockup-${productId || "no-product"}-${timestamp}.png`;
 
       const designUrl = await uploadBufferAndGetUrl(
         designBuffer,
         designFilename,
-        'image/png'
+        "image/png"
       );
       const mockupUrl = await uploadBufferAndGetUrl(
         mockupBuffer,
         mockupFilename,
-        'image/png'
+        "image/png"
       );
 
       // 4) Optional: Mockup als Produktbild in Shopify anfügen
       try {
         await attachMockupToShopifyProduct({ productId, mockupUrl });
       } catch (shopifyErr) {
-        console.error('Fehler bei attachMockupToShopifyProduct:', shopifyErr);
+        console.error("Fehler bei attachMockupToShopifyProduct:", shopifyErr);
       }
 
       // 5) Antwort ans Frontend (für Line Item Properties)
@@ -333,13 +395,14 @@ app.post(
         designUrl,
         mockupUrl,
         productId,
-        variantId
+        variantId,
       });
     } catch (err) {
-      console.error('Fehler in /api/tib/generate-simple:', err);
+      console.error("Fehler in /api/tib/generate-simple:", err);
       res.status(500).json({
-        error: 'Interner Fehler beim Generieren.',
-        details: process.env.NODE_ENV === 'development' ? String(err) : undefined
+        error: "Interner Fehler beim Generieren.",
+        details:
+          process.env.NODE_ENV === "development" ? String(err) : undefined,
       });
     }
   }
