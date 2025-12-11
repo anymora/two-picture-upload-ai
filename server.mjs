@@ -9,6 +9,7 @@ dotenv.config();
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "DEIN_OPENAI_API_KEY_HIER";
 
 // Referenzbild & Mockup-Vorlage (LOKALE DATEIPFADE im Container)
+// Wenn ENV fehlt, werden ./assets/reference.png & ./assets/mockup-template.png benutzt.
 const REFERENCE_IMAGE_PATH =
   process.env.REFERENCE_IMAGE_PATH || "./assets/reference.png";
 const MOCKUP_TEMPLATE_PATH =
@@ -107,7 +108,7 @@ async function uploadBufferAndGetUrl(buffer, filename, mimeType = "image/png") {
 }
 
 // =========================================================
-// OpenAI: Hund + Trikot + Referenz-Bild → Design (lokale Dateien)
+// OpenAI: Hund + Trikot + Referenz-Bild → Design (LOKALE Dateien)
 
 async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
   if (!OPENAI_API_KEY || OPENAI_API_KEY === "DEIN_OPENAI_API_KEY_HIER") {
@@ -173,7 +174,7 @@ async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
 }
 
 // =========================================================
-// Mockup-Erstellung (Overlay auf Template oder Kunden-Trikot)
+// Mockup-Erstellung (LOKALE mockup-template.png oder Kunden-Trikot)
 
 async function createMockup({ jerseyBuffer, designBuffer }) {
   let baseBuffer;
@@ -307,7 +308,7 @@ async function attachMockupToShopifyProduct({ productId, mockupUrl }) {
 
 const app = express();
 
-// CORS sehr offen – reicht für Shopify-Frontend
+// sehr einfache CORS-Regeln
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
