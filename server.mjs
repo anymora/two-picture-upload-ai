@@ -67,6 +67,7 @@ import sharp from "sharp";
 import fs from "fs/promises";
 import fetch from "node-fetch";
 import FormData from "form-data";
+import cors from "cors";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
 // Multer: Dateien im RAM
@@ -322,6 +323,14 @@ async function attachMockupToShopifyProduct({ productId, mockupUrl }) {
 
 // Express App
 const app = express();
+
+// ---- CORS aktivieren (wichtig für Shopify-Frontend!) ----
+app.use(
+  cors({
+    origin: true,          // erlaubt jede Origin, die anfragt (Reflected Origin)
+    credentials: true,     // weil du credentials: 'include' im Frontend nutzt
+  })
+);
 
 // Healthcheck
 app.get("/health", (req, res) => {
