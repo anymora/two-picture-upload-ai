@@ -35,8 +35,14 @@ const DESIGN_POSITION_X = parseFloat(process.env.DESIGN_POSITION_X || "0.0");
 const DESIGN_POSITION_Y = parseFloat(process.env.DESIGN_POSITION_Y || "-0.1");
 
 // Zielauflösung für das Design-Bild (z.B. Druckdatei)
-const DESIGN_OUTPUT_WIDTH = parseInt(process.env.DESIGN_OUTPUT_WIDTH || "3425", 10);
-const DESIGN_OUTPUT_HEIGHT = parseInt(process.env.DESIGN_OUTPUT_HEIGHT || "2953", 10);
+const DESIGN_OUTPUT_WIDTH = parseInt(
+  process.env.DESIGN_OUTPUT_WIDTH || "3425",
+  10
+);
+const DESIGN_OUTPUT_HEIGHT = parseInt(
+  process.env.DESIGN_OUTPUT_HEIGHT || "2953",
+  10
+);
 
 // ---- Shopify ----
 const SHOPIFY_STORE_DOMAIN =
@@ -136,28 +142,28 @@ async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
   formData.append("model", "gpt-image-1");
   formData.append("prompt", BASE_PROMPT);
 
+  // WICHTIG: mehrere Bilder => image[]
   // Reihenfolge wie im Prompt beschrieben:
   // Bild 1 = Referenz, Bild 2 = Hund, Bild 3 = Trikot
-  formData.append("image", referenceBuffer, {
+  formData.append("image[]", referenceBuffer, {
     filename: "reference.png",
     contentType: "image/png"
   });
-  formData.append("image", dogBuffer, {
+  formData.append("image[]", dogBuffer, {
     filename: "dog.png",
     contentType: "image/png"
   });
-  formData.append("image", jerseyBuffer, {
+  formData.append("image[]", jerseyBuffer, {
     filename: "jersey.png",
     contentType: "image/png"
   });
 
-  // WICHTIG: hohe Treue, hohe Qualität, deckender Hintergrund
+  // hohe Treue, hohe Qualität, deckender Hintergrund
   formData.append("input_fidelity", "high");
   formData.append("quality", "high");
   formData.append("background", "opaque");
 
-  // OpenAI unterstützt nur bestimmte Größen – wir nehmen 1024x1024
-  // und skalieren später mit sharp auf 3425x2953.
+  // unterstützte Größe der API – später skalieren wir auf 3425x2953
   formData.append("size", "1024x1024");
 
   formData.append("output_format", "png");
@@ -384,7 +390,7 @@ app.post(
         .png()
         .toBuffer();
 
-      // 3) Mockup erzeugen (nutzt das Original-Design; Auflösung ist egal, wird sowieso angepasst)
+      // 3) Mockup erzeugen (nutzt das Original-Design)
       const mockupBuffer = await createMockup({
         jerseyBuffer: jerseyFile.buffer,
         designBuffer
