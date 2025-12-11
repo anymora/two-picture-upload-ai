@@ -1,1 +1,0 @@
-# two-picture-upload-ai
