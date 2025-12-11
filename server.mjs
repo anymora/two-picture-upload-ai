@@ -8,8 +8,9 @@ dotenv.config();
 // ---- OpenAI / KI ----
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'DEIN_OPENAI_API_KEY_HIER';
 
-// Referenzbild für die KI (z.B. Layout-Beispiel)
-const REFERENCE_IMAGE_PATH = process.env.REFERENCE_IMAGE_PATH || './assets/reference.png';
+// Referenzbild (Dateipfad im Container, z.B. ./assets/reference.png)
+const REFERENCE_IMAGE_PATH =
+  process.env.REFERENCE_IMAGE_PATH || './assets/reference.png';
 
 // Prompt / Beschreibung für die KI
 const BASE_PROMPT =
@@ -23,7 +24,8 @@ const MOCKUP_TEMPLATE_PATH =
 
 // Wenn true: als Basis fürs Mockup wird die MOCKUP_TEMPLATE_PATH-Datei verwendet.
 // Wenn false: als Basis wird das hochgeladene Trikotbild des Kunden verwendet.
-const USE_MOCKUP_TEMPLATE = process.env.USE_MOCKUP_TEMPLATE === 'false' ? false : true;
+const USE_MOCKUP_TEMPLATE =
+  process.env.USE_MOCKUP_TEMPLATE === 'false' ? false : true;
 
 // Skalierung des Designs relativ zur Breite des Mockups (0.0 - 1.0)
 const DESIGN_SCALE = parseFloat(process.env.DESIGN_SCALE || '0.6');
@@ -38,7 +40,7 @@ const DESIGN_POSITION_Y = parseFloat(process.env.DESIGN_POSITION_Y || '-0.1');
 const SHOPIFY_STORE_DOMAIN =
   process.env.SHOPIFY_STORE_DOMAIN || 'dein-shop.myshopify.com';
 
-// Das ist dein Admin Access Token aus der Custom App
+// Admin Access Token aus der Custom App
 const SHOPIFY_ADMIN_ACCESS_TOKEN =
   process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || 'shpat_XXX';
 
@@ -69,10 +71,13 @@ async function uploadBufferAndGetUrl(buffer, filename, mimeType = 'image/png') {
   // HIER DEINEN EIGENEN UPLOAD-CODE EINBAUEN!
   // z.B. AWS S3 putObject, Cloudflare R2 etc.
   // Am Ende MUSS eine öffentlich erreichbare HTTPS-URL zurückkommen.
-  throw new Error('uploadBufferAndGetUrl ist noch nicht implementiert. Bitte an deinen Storage anbinden.');
+  // Solange das nicht implementiert ist, wird der Endpoint hier abbrechen.
+  throw new Error(
+    'uploadBufferAndGetUrl ist noch nicht implementiert. Bitte an deinen Storage anbinden.'
+  );
 }
 
-// OpenAI: aus Hund + Trikot + Referenz-Bild ein Design erzeugen
+// OpenAI: aus Hund + Trikot + Referenz-Bild ein Design erzeugen (Dateipfade!)
 async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
   if (!OPENAI_API_KEY || OPENAI_API_KEY === 'DEIN_OPENAI_API_KEY_HIER') {
     throw new Error('OPENAI_API_KEY ist nicht gesetzt.');
@@ -305,8 +310,16 @@ app.post(
       const designFilename = `design-${productId || 'no-product'}-${timestamp}.png`;
       const mockupFilename = `mockup-${productId || 'no-product'}-${timestamp}.png`;
 
-      const designUrl = await uploadBufferAndGetUrl(designBuffer, designFilename, 'image/png');
-      const mockupUrl = await uploadBufferAndGetUrl(mockupBuffer, mockupFilename, 'image/png');
+      const designUrl = await uploadBufferAndGetUrl(
+        designBuffer,
+        designFilename,
+        'image/png'
+      );
+      const mockupUrl = await uploadBufferAndGetUrl(
+        mockupBuffer,
+        mockupFilename,
+        'image/png'
+      );
 
       // 4) Optional: Mockup als Produktbild in Shopify anfügen
       try {
