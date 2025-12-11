@@ -17,14 +17,15 @@ const MOCKUP_TEMPLATE_PATH =
 // Prompt / Beschreibung für die KI
 const BASE_PROMPT =
   process.env.BASE_PROMPT ||
-  "Nutze die BILDER WIE FOLGT: Bild 1 = Referenzbild des fertigen Trikot-Designs. " +
-    "Bild 2 = Foto des Hundes des Kunden (nur dieses Gesicht verwenden). " +
-    "Bild 3 = Foto des leeren Trikots des Kunden. Aufgabe: Erstelle ein neues, " +
-    "druckfertiges Fußballtrikot-Design im Stil von Bild 1. Ersetze den Hund aus Bild 1 " +
-    "durch den Hund aus Bild 2, mit möglichst ähnlichem Bildausschnitt, Blickrichtung " +
-    "und Stil. Übernimm Farben, Streifen, Logos und Layout so genau wie möglich aus Bild 1. " +
-    "Ignoriere die Hintergründe aller Bilder. Liefere ein vollflächiges Trikot-Design mit " +
-    "deckendem Hintergrund (kein Transparent), geeignet für Druck und Mockups.";
+  "Nutze die BILDER WIE FOLGT: Bild 1 = Referenzbild des fertigen Trikot-Designs (Hund im Stadion, stehende ganze Figur). " +
+    "Bild 2 = Foto des Hundes des Kunden (nur dieses Gesicht/Kopf verwenden). " +
+    "Bild 3 = Foto des leeren Trikots des Kunden. Aufgabe: Erstelle ein neues, druckfertiges Fußballtrikot-Design im Stil von Bild 1. " +
+    "Ersetze den Hund aus Bild 1 durch den Hund aus Bild 2, so dass der Hund vollständig von Kopf bis Pfoten im Bild zu sehen ist, " +
+    "nicht abgeschnitten, mit ähnlicher Körperhaltung, Proportionen und Perspektive wie in Bild 1. Der Hund soll das Trikot aus Bild 3 tragen " +
+    "(Farben, Streifen, Logos und Schnitt so genau wie möglich übernehmen). Der Bildausschnitt soll dem von Bild 1 sehr ähnlich sein: Hund zentral " +
+    "im Vordergrund, Stadion mit Fans im Hintergrund. Schneide weder oben den Kopf noch unten die Pfoten ab. Kein Nahportrait, sondern die ganze Figur. " +
+    "Der Hintergrund soll im Stil von Bild 1 sein (Fußballstadion mit Fans), aber ohne neue Motive, die vom Hund ablenken. " +
+    "Liefere ein vollflächiges Trikot-Bild mit deckendem Hintergrund (kein Transparent), geeignet für Druck und Mockups.";
 
 // ---- Mockup / Overlay ----
 const USE_MOCKUP_TEMPLATE =
@@ -34,7 +35,7 @@ const DESIGN_SCALE = parseFloat(process.env.DESIGN_SCALE || "0.6");
 const DESIGN_POSITION_X = parseFloat(process.env.DESIGN_POSITION_X || "0.0");
 const DESIGN_POSITION_Y = parseFloat(process.env.DESIGN_POSITION_Y || "-0.1");
 
-// Zielauflösung für das Design-Bild (z.B. Druckdatei)
+// Zielauflösung für das endgültige Designbild
 const DESIGN_OUTPUT_WIDTH = parseInt(
   process.env.DESIGN_OUTPUT_WIDTH || "3425",
   10
@@ -142,9 +143,8 @@ async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
   formData.append("model", "gpt-image-1");
   formData.append("prompt", BASE_PROMPT);
 
-  // WICHTIG: mehrere Bilder => image[]
-  // Reihenfolge wie im Prompt beschrieben:
-  // Bild 1 = Referenz, Bild 2 = Hund, Bild 3 = Trikot
+  // Mehrere Bilder -> image[]; Reihenfolge wie im Prompt:
+  // 1 = Referenz, 2 = Hund, 3 = Trikot
   formData.append("image[]", referenceBuffer, {
     filename: "reference.png",
     contentType: "image/png"
@@ -163,8 +163,8 @@ async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
   formData.append("quality", "high");
   formData.append("background", "opaque");
 
-  // unterstützte Größe der API – später skalieren wir auf 3425x2953
-  formData.append("size", "1024x1024");
+  // Portrait-Format, damit ganze Figur besser reinpasst
+  formData.append("size", "1024x1536");
 
   formData.append("output_format", "png");
   formData.append("n", "1");
@@ -382,10 +382,11 @@ app.post(
         jerseyBuffer: jerseyFile.buffer
       });
 
-      // 2) Design auf Zielauflösung skalieren (für Download / Druck)
+      // 2) Design auf Zielauflösung skalieren (ohne Cropping)
       const designOutputBuffer = await sharp(designBuffer)
         .resize(DESIGN_OUTPUT_WIDTH, DESIGN_OUTPUT_HEIGHT, {
-          fit: "cover" // füllt komplett, schneidet ggf. leicht an den Rändern
+          fit: "contain", // NICHT beschneiden, ggf. Ränder
+          background: { r: 0, g: 0, b: 0, alpha: 1 } // schwarzer, deckender Hintergrund
         })
         .png()
         .toBuffer();
