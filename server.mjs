@@ -8,9 +8,9 @@ dotenv.config();
 // ---- OpenAI / KI ----
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "DEIN_OPENAI_API_KEY_HIER";
 
-// Referenzbild (Dateipfad im Container, z.B. ./assets/reference.png)
-const REFERENCE_IMAGE_PATH =
-  process.env.REFERENCE_IMAGE_PATH || "./assets/reference.png";
+// Referenzbild & Mockup-Vorlage (als URL in Railway gespeichert!)
+const REFERENCE_IMAGE_URL = process.env.REFERENCE_IMAGE_PATH;       // ENV enthält eine URL
+const MOCKUP_TEMPLATE_URL = process.env.MOCKUP_TEMPLATE_PATH;       // ENV enthält eine URL
 
 // Prompt / Beschreibung für die KI
 const BASE_PROMPT =
@@ -19,10 +19,8 @@ const BASE_PROMPT =
     "Das Design soll druckfertig sein, ohne Hintergrund, nur das flache Trikot-Design.";
 
 // ---- Mockup / Overlay ----
-const MOCKUP_TEMPLATE_PATH =
-  process.env.MOCKUP_TEMPLATE_PATH || "./assets/mockup-template.png";
 
-// Wenn true: als Basis fürs Mockup wird die MOCKUP_TEMPLATE_PATH-Datei verwendet.
+// Wenn true: als Basis fürs Mockup wird die MOCKUP_TEMPLATE_URL-Datei verwendet.
 // Wenn false: als Basis wird das hochgeladene Trikotbild des Kunden verwendet.
 const USE_MOCKUP_TEMPLATE =
   process.env.USE_MOCKUP_TEMPLATE === "false" ? false : true;
@@ -64,10 +62,8 @@ const PORT = process.env.PORT || 3000;
 import express from "express";
 import multer from "multer";
 import sharp from "sharp";
-import fs from "fs/promises";
 import fetch from "node-fetch";
 import FormData from "form-data";
-import cors from "cors";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
 // Multer: Dateien im RAM
@@ -127,20 +123,30 @@ async function uploadBufferAndGetUrl(
 }
 
 // =========================================================
+// Hilfsfunktion: Bild von URL laden und als Buffer zurückgeben
+async function fetchImageAsBuffer(url, nameForLog = "image") {
+  if (!url) {
+    throw new Error(`${nameForLog} URL ist nicht gesetzt (ENV fehlt oder leer).`);
+  }
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    console.error(`Fehler beim Laden von ${nameForLog} (${url}):`, resp.status, text);
+    throw new Error(`Konnte ${nameForLog} nicht laden.`);
+  }
+  const ab = await resp.arrayBuffer();
+  return Buffer.from(ab);
+}
 
-// OpenAI: aus Hund + Trikot + Referenz-Bild ein Design erzeugen (Dateipfade!)
+// OpenAI: aus Hund + Trikot + Referenz-Bild ein Design erzeugen (URL-basiert)
 async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
   if (!OPENAI_API_KEY || OPENAI_API_KEY === "DEIN_OPENAI_API_KEY_HIER") {
     throw new Error("OPENAI_API_KEY ist nicht gesetzt.");
   }
 
-  const referenceBuffer = await fs.readFile(REFERENCE_IMAGE_PATH).catch(
-    (err) => {
-      console.error("Fehler beim Laden des Referenzbilds:", err);
-      throw new Error(
-        "REFERENZBILD konnte nicht geladen werden. Pfad prüfen."
-      );
-    }
+  const referenceBuffer = await fetchImageAsBuffer(
+    REFERENCE_IMAGE_URL,
+    "Referenzbild"
   );
 
   const formData = new FormData();
@@ -187,6 +193,8 @@ async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
       "OpenAI Antwort ohne b64_json:",
       JSON.stringify(json, null, 2)
     );
+  }
+  if (!b64) {
     throw new Error("OpenAI hat kein Bild zurückgegeben.");
   }
 
@@ -200,15 +208,18 @@ async function createMockup({ jerseyBuffer, designBuffer }) {
   let baseBuffer;
 
   if (USE_MOCKUP_TEMPLATE) {
-    baseBuffer = await fs
-      .readFile(MOCKUP_TEMPLATE_PATH)
-      .catch((err) => {
-        console.error(
-          "Fehler beim Laden der Mockup-Vorlage, fallback auf Kunden-Trikot:",
-          err
-        );
-        return jerseyBuffer;
-      });
+    try {
+      baseBuffer = await fetchImageAsBuffer(
+        MOCKUP_TEMPLATE_URL,
+        "Mockup-Vorlage"
+      );
+    } catch (err) {
+      console.error(
+        "Fehler beim Laden der Mockup-Vorlage, fallback auf Kunden-Trikot:",
+        err
+      );
+      baseBuffer = jerseyBuffer;
+    }
   } else {
     baseBuffer = jerseyBuffer;
   }
@@ -324,13 +335,16 @@ async function attachMockupToShopifyProduct({ productId, mockupUrl }) {
 // Express App
 const app = express();
 
-// ---- CORS aktivieren (wichtig für Shopify-Frontend!) ----
-app.use(
-  cors({
-    origin: true,          // erlaubt jede Origin, die anfragt (Reflected Origin)
-    credentials: true,     // weil du credentials: 'include' im Frontend nutzt
-  })
-);
+// ---- CORS sehr einfach öffnen ----
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
 // Healthcheck
 app.get("/health", (req, res) => {
