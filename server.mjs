@@ -35,15 +35,16 @@ const DESIGN_SCALE = parseFloat(process.env.DESIGN_SCALE || "0.6");
 const DESIGN_POSITION_X = parseFloat(process.env.DESIGN_POSITION_X || "0.0");
 const DESIGN_POSITION_Y = parseFloat(process.env.DESIGN_POSITION_Y || "-0.1");
 
-// Zielauflösung für das endgültige Designbild
-const DESIGN_OUTPUT_WIDTH = parseInt(
-  process.env.DESIGN_OUTPUT_WIDTH || "3425",
-  10
-);
-const DESIGN_OUTPUT_HEIGHT = parseInt(
-  process.env.DESIGN_OUTPUT_HEIGHT || "2953",
-  10
-);
+// (Optional) Konfig für Zielauflösung – wird aktuell NICHT verwendet, da wir
+// das Design 1:1 so übernehmen, wie es von OpenAI kommt.
+// const DESIGN_OUTPUT_WIDTH = parseInt(
+//   process.env.DESIGN_OUTPUT_WIDTH || "3425",
+//   10
+// );
+// const DESIGN_OUTPUT_HEIGHT = parseInt(
+//   process.env.DESIGN_OUTPUT_HEIGHT || "2953",
+//   10
+// );
 
 // ---- Shopify ----
 const SHOPIFY_STORE_DOMAIN =
@@ -158,12 +159,14 @@ async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
     contentType: "image/png"
   });
 
-  // hohe Treue, hohe Qualität, deckender Hintergrund
+  // hohe Treue, hohe Qualität
   formData.append("input_fidelity", "high");
   formData.append("quality", "high");
+
+  // deckender Hintergrund, aber Format kommt vollständig von OpenAI
   formData.append("background", "opaque");
 
-  // Portrait-Format, damit ganze Figur besser reinpasst
+  // Größe für die Generierung – OpenAI liefert dann das finale Format
   formData.append("size", "1024x1536");
 
   formData.append("output_format", "png");
@@ -224,6 +227,7 @@ async function createMockup({ jerseyBuffer, designBuffer }) {
 
   const designWidth = Math.round(baseWidth * DESIGN_SCALE);
 
+  // Design nur skalieren, NICHT beschneiden oder neu einbetten
   const designResizedBuffer = await sharp(designBuffer)
     .resize({ width: designWidth })
     .png()
@@ -376,34 +380,25 @@ app.post(
         });
       }
 
-      // 1) KI-Design erzeugen
+      // 1) KI-Design erzeugen (Format wie von OpenAI geliefert)
       const designBuffer = await generateDesignWithOpenAI({
         dogBuffer: dogFile.buffer,
         jerseyBuffer: jerseyFile.buffer
       });
 
-      // 2) Design auf Zielauflösung skalieren (ohne Cropping)
-      const designOutputBuffer = await sharp(designBuffer)
-        .resize(DESIGN_OUTPUT_WIDTH, DESIGN_OUTPUT_HEIGHT, {
-          fit: "contain", // NICHT beschneiden, ggf. Ränder
-          background: { r: 0, g: 0, b: 0, alpha: 1 } // schwarzer, deckender Hintergrund
-        })
-        .png()
-        .toBuffer();
-
-      // 3) Mockup erzeugen (nutzt das Original-Design)
+      // 2) Mockup erzeugen (nutzt das Original-Design)
       const mockupBuffer = await createMockup({
         jerseyBuffer: jerseyFile.buffer,
         designBuffer
       });
 
-      // 4) Beides in R2 hochladen
+      // 3) Beides in R2 hochladen (Design 1:1, keine zusätzliche Skalierung / kein künstlicher Hintergrund)
       const timestamp = Date.now();
       const designFilename = `design-${productId || "no-product"}-${timestamp}.png`;
       const mockupFilename = `mockup-${productId || "no-product"}-${timestamp}.png`;
 
       const designUrl = await uploadBufferAndGetUrl(
-        designOutputBuffer,
+        designBuffer,
         designFilename,
         "image/png"
       );
@@ -412,7 +407,6 @@ app.post(
         mockupFilename,
         "image/png"
       );
-      
 
       console.log("Erfolgreich generiert:", { designUrl, mockupUrl });
 
