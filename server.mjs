@@ -35,17 +35,6 @@ const DESIGN_SCALE = parseFloat(process.env.DESIGN_SCALE || "0.6");
 const DESIGN_POSITION_X = parseFloat(process.env.DESIGN_POSITION_X || "0.0");
 const DESIGN_POSITION_Y = parseFloat(process.env.DESIGN_POSITION_Y || "-0.1");
 
-// (Optional) Konfig für Zielauflösung – wird aktuell NICHT verwendet, da wir
-// das Design 1:1 so übernehmen, wie es von OpenAI kommt.
-// const DESIGN_OUTPUT_WIDTH = parseInt(
-//   process.env.DESIGN_OUTPUT_WIDTH || "3425",
-//   10
-// );
-// const DESIGN_OUTPUT_HEIGHT = parseInt(
-//   process.env.DESIGN_OUTPUT_HEIGHT || "2953",
-//   10
-// );
-
 // ---- Shopify ----
 const SHOPIFY_STORE_DOMAIN =
   process.env.SHOPIFY_STORE_DOMAIN || "dein-shop.myshopify.com";
@@ -127,7 +116,7 @@ async function uploadBufferAndGetUrl(buffer, filename, mimeType = "image/png") {
 // =========================================================
 // OpenAI: Referenz + Hund + Trikot → Design
 
-async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
+async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer, promptOverride }) {
   if (!OPENAI_API_KEY || OPENAI_API_KEY === "DEIN_OPENAI_API_KEY_HIER") {
     throw new Error("OPENAI_API_KEY ist nicht gesetzt.");
   }
@@ -140,9 +129,14 @@ async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
     throw new Error("REFERENZBILD konnte nicht geladen werden. Pfad prüfen.");
   }
 
+  const effectivePrompt =
+    typeof promptOverride === "string" && promptOverride.trim().length > 0
+      ? promptOverride.trim()
+      : BASE_PROMPT;
+
   const formData = new FormData();
   formData.append("model", "gpt-image-1");
-  formData.append("prompt", BASE_PROMPT);
+  formData.append("prompt", effectivePrompt);
 
   // Mehrere Bilder -> image[]; Reihenfolge wie im Prompt:
   // 1 = Referenz, 2 = Hund, 3 = Trikot
@@ -204,15 +198,40 @@ async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer }) {
 // =========================================================
 // Mockup-Erstellung (LOKALE mockup-template.png oder Kunden-Trikot)
 
-async function createMockup({ jerseyBuffer, designBuffer }) {
+// NEU: Mockup-Template anhand mockupType auswählen
+function resolveMockupTemplatePath(mockupType) {
+  // Default: sweatshirt -> mockup-template.png (oder per ENV überschrieben)
+  if (!mockupType || String(mockupType).trim() === "" || String(mockupType).toLowerCase() === "sweatshirt") {
+    return MOCKUP_TEMPLATE_PATH;
+  }
+
+  // erwartete Werte aus Frontend: hoodie, t-shirt, kissen, tasse, fussmatte, turnbeutel
+  const type = String(mockupType).toLowerCase().trim();
+
+  // Wenn MOCKUP_TEMPLATE_PATH custom gesetzt wurde, bauen wir den Pfad robust daneben auf:
+  // z.B. ./assets/mockup-template.png -> ./assets/mockup-template-hoodie.png
+  const base = MOCKUP_TEMPLATE_PATH;
+  const match = base.match(/^(.*\/)?mockup-template\.png$/);
+  if (match) {
+    const prefix = match[1] || "";
+    return `${prefix}mockup-template-${type}.png`;
+  }
+
+  // Fallback, falls jemand MOCKUP_TEMPLATE_PATH komisch setzt:
+  return `./assets/mockup-template-${type}.png`;
+}
+
+async function createMockup({ jerseyBuffer, designBuffer, mockupType }) {
   let baseBuffer;
 
   if (USE_MOCKUP_TEMPLATE) {
+    const chosenTemplatePath = resolveMockupTemplatePath(mockupType);
+
     try {
-      baseBuffer = await fs.readFile(MOCKUP_TEMPLATE_PATH);
+      baseBuffer = await fs.readFile(chosenTemplatePath);
     } catch (err) {
       console.error(
-        "Fehler beim Laden der Mockup-Vorlage, fallback auf Kunden-Trikot:",
+        "Fehler beim Laden der Mockup-Vorlage (" + chosenTemplatePath + "), fallback auf Kunden-Trikot:",
         err
       );
       baseBuffer = jerseyBuffer;
@@ -374,6 +393,10 @@ app.post(
       const productId = req.body.productId;
       const variantId = req.body.variantId;
 
+      // NEU: Frontend sendet mockupType + prompt
+      const mockupType = req.body.mockupType;
+      const prompt = req.body.prompt;
+
       if (!dogFile || !jerseyFile) {
         return res.status(400).json({
           error: "dogImage und jerseyImage sind Pflicht."
@@ -383,13 +406,15 @@ app.post(
       // 1) KI-Design erzeugen (Format wie von OpenAI geliefert)
       const designBuffer = await generateDesignWithOpenAI({
         dogBuffer: dogFile.buffer,
-        jerseyBuffer: jerseyFile.buffer
+        jerseyBuffer: jerseyFile.buffer,
+        promptOverride: prompt
       });
 
-      // 2) Mockup erzeugen (nutzt das Original-Design)
+      // 2) Mockup erzeugen (nutzt das Original-Design) + NEU: Template anhand mockupType
       const mockupBuffer = await createMockup({
         jerseyBuffer: jerseyFile.buffer,
-        designBuffer
+        designBuffer,
+        mockupType
       });
 
       // 3) Beides in R2 hochladen (Design 1:1, keine zusätzliche Skalierung / kein künstlicher Hintergrund)
@@ -408,7 +433,7 @@ app.post(
         "image/png"
       );
 
-      console.log("Erfolgreich generiert:", { designUrl, mockupUrl });
+      console.log("Erfolgreich generiert:", { designUrl, mockupUrl, mockupType });
 
       res.json({
         designUrl,
