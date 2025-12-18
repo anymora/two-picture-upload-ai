@@ -206,7 +206,9 @@ function resolveMockupTemplatePath(mockupType) {
   }
 
   // erwartete Werte aus Frontend: hoodie, t-shirt, kissen, tasse, fussmatte, turnbeutel
-  const type = String(mockupType).toLowerCase().trim();
+  // NEU (Geschenk-Tasse): "tasse" -> Template heißt mockup-template-mug.png (Alias)
+  let type = String(mockupType).toLowerCase().trim();
+  if (type === "tasse") type = "mug";
 
   // Wenn MOCKUP_TEMPLATE_PATH custom gesetzt wurde, bauen wir den Pfad robust daneben auf:
   // z.B. ./assets/mockup-template.png -> ./assets/mockup-template-hoodie.png
@@ -417,10 +419,18 @@ app.post(
         mockupType
       });
 
+      // NEU: Geschenk-Mockup (Tasse) erzeugen (Template: mockup-template-mug.png)
+      const giftMockupBuffer = await createMockup({
+        jerseyBuffer: jerseyFile.buffer,
+        designBuffer,
+        mockupType: "tasse"
+      });
+
       // 3) Beides in R2 hochladen (Design 1:1, keine zusätzliche Skalierung / kein künstlicher Hintergrund)
       const timestamp = Date.now();
       const designFilename = `design-${productId || "no-product"}-${timestamp}.png`;
       const mockupFilename = `mockup-${productId || "no-product"}-${timestamp}.png`;
+      const giftMockupFilename = `gift-mockup-${productId || "no-product"}-${timestamp}.png`;
 
       const designUrl = await uploadBufferAndGetUrl(
         designBuffer,
@@ -432,12 +442,18 @@ app.post(
         mockupFilename,
         "image/png"
       );
+      const giftMockupUrl = await uploadBufferAndGetUrl(
+        giftMockupBuffer,
+        giftMockupFilename,
+        "image/png"
+      );
 
-      console.log("Erfolgreich generiert:", { designUrl, mockupUrl, mockupType });
+      console.log("Erfolgreich generiert:", { designUrl, mockupUrl, giftMockupUrl, mockupType });
 
       res.json({
         designUrl,
         mockupUrl,
+        giftMockupUrl,
         productId,
         variantId
       });
