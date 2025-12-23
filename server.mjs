@@ -114,76 +114,144 @@ async function uploadBufferAndGetUrl(buffer, filename, mimeType = "image/png") {
 }
 
 // =========================================================
+// Helpers: Remote Image Download + normalize to PNG
+
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+async function downloadImageAsPngBuffer(url, label = "remoteImage") {
+  if (!isNonEmptyString(url)) {
+    throw new Error(`[${label}] URL ist leer.`);
+  }
+
+  const u = url.trim();
+
+  // Basic sanity: must be http(s)
+  if (!/^https?:\/\//i.test(u)) {
+    throw new Error(`[${label}] URL muss mit http/https starten: ${u}`);
+  }
+
+  // Timeout
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+
+  let resp;
+  try {
+    resp = await fetch(u, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        // Manche CDNs geben sonst WebP/AVIF; Sharp kann das, aber wir normalisieren eh auf PNG.
+        "User-Agent": "tib-backend/1.0",
+        "Accept": "image/*,*/*;q=0.8"
+      }
+    });
+  } catch (e) {
+    clearTimeout(timeout);
+    throw new Error(`[${label}] Fetch fehlgeschlagen: ${e?.message || String(e)}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!resp.ok) {
+    throw new Error(`[${label}] URL nicht ladbar (${resp.status}).`);
+  }
+
+  // Hard size guard (15MB)
+  const cl = resp.headers.get("content-length");
+  if (cl && Number(cl) > 15 * 1024 * 1024) {
+    throw new Error(`[${label}] Bild zu groß (>15MB).`);
+  }
+
+  const arr = await resp.arrayBuffer();
+  const raw = Buffer.from(arr);
+
+  // Normalisieren auf PNG (damit OpenAI + Sharp sauber sind)
+  try {
+    const png = await sharp(raw).png().toBuffer();
+    return png;
+  } catch (e) {
+    throw new Error(`[${label}] Bild konnte nicht dekodiert/konvertiert werden: ${e?.message || String(e)}`);
+  }
+}
+
+// =========================================================
 // OpenAI: Referenz + Hund + Trikot → Design
 
 async function generateDesignWithOpenAI({
   dogBuffer,
   jerseyBuffer,
   promptOverride,
-  referenceImageUrl // NEU
+  referenceImageUrl
 }) {
   if (!OPENAI_API_KEY || OPENAI_API_KEY === "DEIN_OPENAI_API_KEY_HIER") {
     throw new Error("OPENAI_API_KEY ist nicht gesetzt.");
   }
 
   let referenceBuffer;
+  let referenceSource = "local";
+
   try {
-    // NEU: Wenn Frontend-URL gesetzt -> die nehmen, sonst Backend-Asset
-    if (typeof referenceImageUrl === "string" && referenceImageUrl.trim().length > 0) {
-      const r = await fetch(referenceImageUrl.trim());
-      if (!r.ok) throw new Error("Referenzbild URL nicht ladbar: " + r.status);
-      const arr = await r.arrayBuffer();
-      referenceBuffer = Buffer.from(arr);
+    // Wenn URL gesetzt -> MUSS sie genommen werden, sonst hard fail (kein stiller Fallback!)
+    if (isNonEmptyString(referenceImageUrl)) {
+      referenceSource = "url";
+      referenceBuffer = await downloadImageAsPngBuffer(referenceImageUrl, "referenceImageUrl");
     } else {
+      referenceSource = "local";
       referenceBuffer = await fs.readFile(REFERENCE_IMAGE_PATH);
+      // local auch auf PNG normalisieren (falls jemand JPG als reference.png reinlegt)
+      referenceBuffer = await sharp(referenceBuffer).png().toBuffer();
     }
   } catch (err) {
-    console.error("Fehler beim Laden des Referenzbilds:", err);
-    throw new Error("REFERENZBILD konnte nicht geladen werden. Pfad/URL prüfen.");
+    console.error("[REF] Fehler beim Laden Referenz:", err);
+    // Wenn URL gesetzt war, wollen wir NICHT fallbacken -> klarer Fehler
+    throw new Error(
+      isNonEmptyString(referenceImageUrl)
+        ? "Referenzbild-URL ist gesetzt, aber nicht nutzbar. Bitte URL prüfen."
+        : "REFERENZBILD konnte nicht geladen werden. Pfad prüfen."
+    );
   }
 
   const effectivePrompt =
-    typeof promptOverride === "string" && promptOverride.trim().length > 0
-      ? promptOverride.trim()
-      : BASE_PROMPT;
+    isNonEmptyString(promptOverride) ? promptOverride.trim() : BASE_PROMPT;
+
+  console.log("[OpenAI] Reference source:", referenceSource, isNonEmptyString(referenceImageUrl) ? referenceImageUrl.trim() : "");
 
   const formData = new FormData();
   formData.append("model", "gpt-image-1");
   formData.append("prompt", effectivePrompt);
 
-  // Mehrere Bilder -> image[]; Reihenfolge wie im Prompt:
-  // 1 = Referenz, 2 = Hund, 3 = Trikot
+  // Reihenfolge wie im Prompt: 1 = Referenz, 2 = Hund, 3 = Trikot
   formData.append("image[]", referenceBuffer, {
     filename: "reference.png",
     contentType: "image/png"
   });
-  formData.append("image[]", dogBuffer, {
+
+  // Hund/Trikot ebenfalls auf PNG normalisieren (stabiler)
+  const dogPng = await sharp(dogBuffer).png().toBuffer();
+  const jerseyPng = await sharp(jerseyBuffer).png().toBuffer();
+
+  formData.append("image[]", dogPng, {
     filename: "dog.png",
     contentType: "image/png"
   });
-  formData.append("image[]", jerseyBuffer, {
+  formData.append("image[]", jerseyPng, {
     filename: "jersey.png",
     contentType: "image/png"
   });
 
-  // hohe Treue, hohe Qualität
   formData.append("input_fidelity", "high");
   formData.append("quality", "high");
-
-  // deckender Hintergrund, aber Format kommt vollständig von OpenAI
   formData.append("background", "opaque");
-
-  // Größe für die Generierung – OpenAI liefert dann das finale Format
   formData.append("size", "1024x1536");
-
   formData.append("output_format", "png");
   formData.append("n", "1");
 
   const response = await fetch("https://api.openai.com/v1/images/edits", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`
-    },
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
     body: formData
   });
 
@@ -197,34 +265,28 @@ async function generateDesignWithOpenAI({
   const b64 = json?.data?.[0]?.b64_json;
 
   if (!b64) {
-    console.error(
-      "OpenAI Antwort ohne b64_json:",
-      JSON.stringify(json, null, 2)
-    );
+    console.error("OpenAI Antwort ohne b64_json:", JSON.stringify(json, null, 2));
     throw new Error("OpenAI hat kein Bild zurückgegeben.");
   }
 
-  const designBuffer = Buffer.from(b64, "base64");
-  return designBuffer;
+  return Buffer.from(b64, "base64");
 }
 
 // =========================================================
 // Mockup-Erstellung (LOKALE mockup-template.png oder Kunden-Trikot)
 
-// NEU: Mockup-Template anhand mockupType auswählen
 function resolveMockupTemplatePath(mockupType) {
-  // Default: sweatshirt -> mockup-template.png (oder per ENV überschrieben)
-  if (!mockupType || String(mockupType).trim() === "" || String(mockupType).toLowerCase() === "sweatshirt") {
+  if (
+    !mockupType ||
+    String(mockupType).trim() === "" ||
+    String(mockupType).toLowerCase() === "sweatshirt"
+  ) {
     return MOCKUP_TEMPLATE_PATH;
   }
 
-  // erwartete Werte aus Frontend: hoodie, t-shirt, kissen, tasse, fussmatte, turnbeutel
-  // NEU (Geschenk-Tasse): "tasse" -> Template heißt mockup-template-mug.png (Alias)
   let type = String(mockupType).toLowerCase().trim();
   if (type === "tasse") type = "mug";
 
-  // Wenn MOCKUP_TEMPLATE_PATH custom gesetzt wurde, bauen wir den Pfad robust daneben auf:
-  // z.B. ./assets/mockup-template.png -> ./assets/mockup-template-hoodie.png
   const base = MOCKUP_TEMPLATE_PATH;
   const match = base.match(/^(.*\/)?mockup-template\.png$/);
   if (match) {
@@ -232,7 +294,6 @@ function resolveMockupTemplatePath(mockupType) {
     return `${prefix}mockup-template-${type}.png`;
   }
 
-  // Fallback, falls jemand MOCKUP_TEMPLATE_PATH komisch setzt:
   return `./assets/mockup-template-${type}.png`;
 }
 
@@ -240,58 +301,61 @@ async function createMockup({
   jerseyBuffer,
   designBuffer,
   mockupType,
-  customMockupUrl, // NEU
-  designScale,     // NEU
-  designPosX,      // NEU
-  designPosY       // NEU
+  customMockupUrl,
+  designScale,
+  designPosX,
+  designPosY
 }) {
   let baseBuffer;
+  let mockupSource = "jersey";
 
-  // NEU: Frontend-Custom-Mockup hat höchste Priorität
-  if (typeof customMockupUrl === "string" && customMockupUrl.trim().length > 0) {
-    const r = await fetch(customMockupUrl.trim());
-    if (!r.ok) throw new Error("customMockupUrl nicht ladbar: " + r.status);
-    const arr = await r.arrayBuffer();
-    baseBuffer = Buffer.from(arr);
-  } else if (USE_MOCKUP_TEMPLATE) {
+  // 1) Custom URL -> MUSS genommen werden (und bei Fehler: hard fail)
+  if (isNonEmptyString(customMockupUrl)) {
+    mockupSource = "customUrl";
+    baseBuffer = await downloadImageAsPngBuffer(customMockupUrl, "customMockupUrl");
+  }
+  // 2) Template
+  else if (USE_MOCKUP_TEMPLATE) {
+    mockupSource = "template";
     const chosenTemplatePath = resolveMockupTemplatePath(mockupType);
-
     try {
       baseBuffer = await fs.readFile(chosenTemplatePath);
+      baseBuffer = await sharp(baseBuffer).png().toBuffer();
     } catch (err) {
       console.error(
-        "Fehler beim Laden der Mockup-Vorlage (" + chosenTemplatePath + "), fallback auf Kunden-Trikot:",
+        "[Mockup] Template nicht ladbar (" + chosenTemplatePath + "), fallback auf Kunden-Trikot:",
         err
       );
-      baseBuffer = jerseyBuffer;
+      mockupSource = "jersey";
+      baseBuffer = await sharp(jerseyBuffer).png().toBuffer();
     }
-  } else {
-    baseBuffer = jerseyBuffer;
   }
+  // 3) Jersey
+  else {
+    mockupSource = "jersey";
+    baseBuffer = await sharp(jerseyBuffer).png().toBuffer();
+  }
+
+  console.log("[Mockup] Source:", mockupSource, "mockupType:", mockupType || "");
 
   const baseMeta = await sharp(baseBuffer).metadata();
   const baseWidth = baseMeta.width || 1024;
   const baseHeight = baseMeta.height || 1024;
 
-  // NEU: pro Request überschreiben, sonst ENV-Defaults
-  const effectiveScale =
-    typeof designScale !== "undefined" && designScale !== null && String(designScale).trim() !== ""
-      ? parseFloat(designScale)
-      : DESIGN_SCALE;
+  const effectiveScale = isNonEmptyString(String(designScale ?? ""))
+    ? parseFloat(designScale)
+    : DESIGN_SCALE;
 
-  const effectivePosX =
-    typeof designPosX !== "undefined" && designPosX !== null && String(designPosX).trim() !== ""
-      ? parseFloat(designPosX)
-      : DESIGN_POSITION_X;
+  const effectivePosX = isNonEmptyString(String(designPosX ?? ""))
+    ? parseFloat(designPosX)
+    : DESIGN_POSITION_X;
 
-  const effectivePosY =
-    typeof designPosY !== "undefined" && designPosY !== null && String(designPosY).trim() !== ""
-      ? parseFloat(designPosY)
-      : DESIGN_POSITION_Y;
+  const effectivePosY = isNonEmptyString(String(designPosY ?? ""))
+    ? parseFloat(designPosY)
+    : DESIGN_POSITION_Y;
 
   const designWidth = Math.round(baseWidth * effectiveScale);
 
-  // Design nur skalieren, NICHT beschneiden oder neu einbetten
   const designResizedBuffer = await sharp(designBuffer)
     .resize({ width: designWidth })
     .png()
@@ -388,17 +452,11 @@ async function attachMockupToShopifyProduct({ productId, mockupUrl }) {
 
   const json = await resp.json();
   if (json.errors) {
-    console.error(
-      "[Shopify] GraphQL errors:",
-      JSON.stringify(json.errors, null, 2)
-    );
+    console.error("[Shopify] GraphQL errors:", JSON.stringify(json.errors, null, 2));
   }
   const mediaErrors = json.data?.productCreateMedia?.mediaUserErrors || [];
   if (mediaErrors.length > 0) {
-    console.error(
-      "[Shopify] mediaUserErrors:",
-      JSON.stringify(mediaErrors, null, 2)
-    );
+    console.error("[Shopify] mediaUserErrors:", JSON.stringify(mediaErrors, null, 2));
   }
 }
 
@@ -407,7 +465,6 @@ async function attachMockupToShopifyProduct({ productId, mockupUrl }) {
 
 const app = express();
 
-// sehr einfache CORS-Regeln
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -438,16 +495,21 @@ app.post(
       const productId = req.body.productId;
       const variantId = req.body.variantId;
 
-      // Frontend sendet mockupType + prompt
       const mockupType = req.body.mockupType;
       const prompt = req.body.prompt;
 
-      // NEU: Frontend Overrides (werden bevorzugt)
+      // Frontend Overrides
       const referenceImageUrl = req.body.referenceImageUrl;
       const customMockupUrl = req.body.customMockupUrl;
       const designScale = req.body.designScale;
       const designPosX = req.body.designPosX;
       const designPosY = req.body.designPosY;
+
+      // Debug: zeigt dir in Railway Logs sofort ob es ankommt
+      console.log("[REQ] mockupType:", mockupType);
+      console.log("[REQ] has referenceImageUrl:", isNonEmptyString(referenceImageUrl), referenceImageUrl ? String(referenceImageUrl).slice(0, 120) : "");
+      console.log("[REQ] has customMockupUrl:", isNonEmptyString(customMockupUrl), customMockupUrl ? String(customMockupUrl).slice(0, 120) : "");
+      console.log("[REQ] placement:", { designScale, designPosX, designPosY });
 
       if (!dogFile || !jerseyFile) {
         return res.status(400).json({
@@ -455,27 +517,26 @@ app.post(
         });
       }
 
-      // 1) KI-Design erzeugen (Format wie von OpenAI geliefert)
+      // 1) KI-Design erzeugen
       const designBuffer = await generateDesignWithOpenAI({
         dogBuffer: dogFile.buffer,
         jerseyBuffer: jerseyFile.buffer,
         promptOverride: prompt,
-        referenceImageUrl // NEU
+        referenceImageUrl
       });
 
-      // 2) Mockup erzeugen (CustomMockupUrl > Template > Jersey)
+      // 2) Mockup erzeugen (customUrl > template > jersey)
       const mockupBuffer = await createMockup({
         jerseyBuffer: jerseyFile.buffer,
         designBuffer,
         mockupType,
-        customMockupUrl, // NEU
-        designScale,     // NEU
-        designPosX,      // NEU
-        designPosY       // NEU
+        customMockupUrl,
+        designScale,
+        designPosX,
+        designPosY
       });
 
-      // Geschenk-Mockup (Tasse) – nutzt standardmäßig das mug-template.
-      // Wenn du willst, dass customMockupUrl auch fürs Geschenk gilt, setz hier customMockupUrl statt "".
+      // Geschenk-Mockup (Tasse)
       const giftMockupBuffer = await createMockup({
         jerseyBuffer: jerseyFile.buffer,
         designBuffer,
@@ -492,21 +553,9 @@ app.post(
       const mockupFilename = `mockup-${productId || "no-product"}-${timestamp}.png`;
       const giftMockupFilename = `gift-mockup-${productId || "no-product"}-${timestamp}.png`;
 
-      const designUrl = await uploadBufferAndGetUrl(
-        designBuffer,
-        designFilename,
-        "image/png"
-      );
-      const mockupUrl = await uploadBufferAndGetUrl(
-        mockupBuffer,
-        mockupFilename,
-        "image/png"
-      );
-      const giftMockupUrl = await uploadBufferAndGetUrl(
-        giftMockupBuffer,
-        giftMockupFilename,
-        "image/png"
-      );
+      const designUrl = await uploadBufferAndGetUrl(designBuffer, designFilename, "image/png");
+      const mockupUrl = await uploadBufferAndGetUrl(mockupBuffer, mockupFilename, "image/png");
+      const giftMockupUrl = await uploadBufferAndGetUrl(giftMockupBuffer, giftMockupFilename, "image/png");
 
       console.log("Erfolgreich generiert:", {
         designUrl,
@@ -514,10 +563,7 @@ app.post(
         giftMockupUrl,
         mockupType,
         referenceImageUrl: !!referenceImageUrl,
-        customMockupUrl: !!customMockupUrl,
-        designScale,
-        designPosX,
-        designPosY
+        customMockupUrl: !!customMockupUrl
       });
 
       res.json({
@@ -529,10 +575,19 @@ app.post(
       });
     } catch (err) {
       console.error("Fehler in /api/tib/generate-simple:", err);
-      res.status(500).json({
-        error: "Interner Fehler beim Generieren.",
-        details:
-          process.env.NODE_ENV === "development" ? String(err) : undefined
+
+      // Wenn URL gesetzt war und Download/Decode scheitert -> lieber 400 statt “interner Fehler”
+      const msg = String(err?.message || err);
+      const isClientInputIssue =
+        msg.includes("Referenzbild-URL") ||
+        msg.includes("[referenceImageUrl]") ||
+        msg.includes("[customMockupUrl]") ||
+        msg.includes("URL nicht ladbar") ||
+        msg.includes("nicht dekodiert");
+
+      res.status(isClientInputIssue ? 400 : 500).json({
+        error: isClientInputIssue ? "Ungültige Bild-URL / Bildformat." : "Interner Fehler beim Generieren.",
+        details: process.env.NODE_ENV === "development" ? msg : undefined
       });
     }
   }
