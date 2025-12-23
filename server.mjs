@@ -116,17 +116,30 @@ async function uploadBufferAndGetUrl(buffer, filename, mimeType = "image/png") {
 // =========================================================
 // OpenAI: Referenz + Hund + Trikot → Design
 
-async function generateDesignWithOpenAI({ dogBuffer, jerseyBuffer, promptOverride }) {
+async function generateDesignWithOpenAI({
+  dogBuffer,
+  jerseyBuffer,
+  promptOverride,
+  referenceImageUrl // NEU
+}) {
   if (!OPENAI_API_KEY || OPENAI_API_KEY === "DEIN_OPENAI_API_KEY_HIER") {
     throw new Error("OPENAI_API_KEY ist nicht gesetzt.");
   }
 
   let referenceBuffer;
   try {
-    referenceBuffer = await fs.readFile(REFERENCE_IMAGE_PATH);
+    // NEU: Wenn Frontend-URL gesetzt -> die nehmen, sonst Backend-Asset
+    if (typeof referenceImageUrl === "string" && referenceImageUrl.trim().length > 0) {
+      const r = await fetch(referenceImageUrl.trim());
+      if (!r.ok) throw new Error("Referenzbild URL nicht ladbar: " + r.status);
+      const arr = await r.arrayBuffer();
+      referenceBuffer = Buffer.from(arr);
+    } else {
+      referenceBuffer = await fs.readFile(REFERENCE_IMAGE_PATH);
+    }
   } catch (err) {
     console.error("Fehler beim Laden des Referenzbilds:", err);
-    throw new Error("REFERENZBILD konnte nicht geladen werden. Pfad prüfen.");
+    throw new Error("REFERENZBILD konnte nicht geladen werden. Pfad/URL prüfen.");
   }
 
   const effectivePrompt =
@@ -223,10 +236,24 @@ function resolveMockupTemplatePath(mockupType) {
   return `./assets/mockup-template-${type}.png`;
 }
 
-async function createMockup({ jerseyBuffer, designBuffer, mockupType }) {
+async function createMockup({
+  jerseyBuffer,
+  designBuffer,
+  mockupType,
+  customMockupUrl, // NEU
+  designScale,     // NEU
+  designPosX,      // NEU
+  designPosY       // NEU
+}) {
   let baseBuffer;
 
-  if (USE_MOCKUP_TEMPLATE) {
+  // NEU: Frontend-Custom-Mockup hat höchste Priorität
+  if (typeof customMockupUrl === "string" && customMockupUrl.trim().length > 0) {
+    const r = await fetch(customMockupUrl.trim());
+    if (!r.ok) throw new Error("customMockupUrl nicht ladbar: " + r.status);
+    const arr = await r.arrayBuffer();
+    baseBuffer = Buffer.from(arr);
+  } else if (USE_MOCKUP_TEMPLATE) {
     const chosenTemplatePath = resolveMockupTemplatePath(mockupType);
 
     try {
@@ -246,7 +273,23 @@ async function createMockup({ jerseyBuffer, designBuffer, mockupType }) {
   const baseWidth = baseMeta.width || 1024;
   const baseHeight = baseMeta.height || 1024;
 
-  const designWidth = Math.round(baseWidth * DESIGN_SCALE);
+  // NEU: pro Request überschreiben, sonst ENV-Defaults
+  const effectiveScale =
+    typeof designScale !== "undefined" && designScale !== null && String(designScale).trim() !== ""
+      ? parseFloat(designScale)
+      : DESIGN_SCALE;
+
+  const effectivePosX =
+    typeof designPosX !== "undefined" && designPosX !== null && String(designPosX).trim() !== ""
+      ? parseFloat(designPosX)
+      : DESIGN_POSITION_X;
+
+  const effectivePosY =
+    typeof designPosY !== "undefined" && designPosY !== null && String(designPosY).trim() !== ""
+      ? parseFloat(designPosY)
+      : DESIGN_POSITION_Y;
+
+  const designWidth = Math.round(baseWidth * effectiveScale);
 
   // Design nur skalieren, NICHT beschneiden oder neu einbetten
   const designResizedBuffer = await sharp(designBuffer)
@@ -260,8 +303,8 @@ async function createMockup({ jerseyBuffer, designBuffer, mockupType }) {
   const centerX = baseWidth / 2;
   const centerY = baseHeight / 2;
 
-  const offsetX = DESIGN_POSITION_X * (baseWidth / 2);
-  const offsetY = DESIGN_POSITION_Y * (baseHeight / 2);
+  const offsetX = effectivePosX * (baseWidth / 2);
+  const offsetY = effectivePosY * (baseHeight / 2);
 
   const left = Math.round(centerX - designWidth / 2 + offsetX);
   const top = Math.round(centerY - designHeight / 2 + offsetY);
@@ -395,9 +438,16 @@ app.post(
       const productId = req.body.productId;
       const variantId = req.body.variantId;
 
-      // NEU: Frontend sendet mockupType + prompt
+      // Frontend sendet mockupType + prompt
       const mockupType = req.body.mockupType;
       const prompt = req.body.prompt;
+
+      // NEU: Frontend Overrides (werden bevorzugt)
+      const referenceImageUrl = req.body.referenceImageUrl;
+      const customMockupUrl = req.body.customMockupUrl;
+      const designScale = req.body.designScale;
+      const designPosX = req.body.designPosX;
+      const designPosY = req.body.designPosY;
 
       if (!dogFile || !jerseyFile) {
         return res.status(400).json({
@@ -409,24 +459,34 @@ app.post(
       const designBuffer = await generateDesignWithOpenAI({
         dogBuffer: dogFile.buffer,
         jerseyBuffer: jerseyFile.buffer,
-        promptOverride: prompt
+        promptOverride: prompt,
+        referenceImageUrl // NEU
       });
 
-      // 2) Mockup erzeugen (nutzt das Original-Design) + NEU: Template anhand mockupType
+      // 2) Mockup erzeugen (CustomMockupUrl > Template > Jersey)
       const mockupBuffer = await createMockup({
         jerseyBuffer: jerseyFile.buffer,
         designBuffer,
-        mockupType
+        mockupType,
+        customMockupUrl, // NEU
+        designScale,     // NEU
+        designPosX,      // NEU
+        designPosY       // NEU
       });
 
-      // NEU: Geschenk-Mockup (Tasse) erzeugen (Template: mockup-template-mug.png)
+      // Geschenk-Mockup (Tasse) – nutzt standardmäßig das mug-template.
+      // Wenn du willst, dass customMockupUrl auch fürs Geschenk gilt, setz hier customMockupUrl statt "".
       const giftMockupBuffer = await createMockup({
         jerseyBuffer: jerseyFile.buffer,
         designBuffer,
-        mockupType: "tasse"
+        mockupType: "tasse",
+        customMockupUrl: "", // bewusst kein Override fürs Geschenk
+        designScale,
+        designPosX,
+        designPosY
       });
 
-      // 3) Beides in R2 hochladen (Design 1:1, keine zusätzliche Skalierung / kein künstlicher Hintergrund)
+      // 3) Upload zu R2
       const timestamp = Date.now();
       const designFilename = `design-${productId || "no-product"}-${timestamp}.png`;
       const mockupFilename = `mockup-${productId || "no-product"}-${timestamp}.png`;
@@ -448,7 +508,17 @@ app.post(
         "image/png"
       );
 
-      console.log("Erfolgreich generiert:", { designUrl, mockupUrl, giftMockupUrl, mockupType });
+      console.log("Erfolgreich generiert:", {
+        designUrl,
+        mockupUrl,
+        giftMockupUrl,
+        mockupType,
+        referenceImageUrl: !!referenceImageUrl,
+        customMockupUrl: !!customMockupUrl,
+        designScale,
+        designPosX,
+        designPosY
+      });
 
       res.json({
         designUrl,
